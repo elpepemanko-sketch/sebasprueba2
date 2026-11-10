@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Tetris con Joystick Arduino</title>
+<style>
+:root{color-scheme:dark;--bg:#101522;--panel:#1a2335;--muted:#9ba9c2;--accent:#70e1c1}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;font-family:system-ui,Arial;color:#f5f7fb;background:radial-gradient(circle at top,#263653,#101522 58%)}
+.app{width:min(900px,100%)}header{text-align:center;margin-bottom:18px}h1{margin:0;font-size:clamp(2rem,5vw,3rem);letter-spacing:2px}header p{color:var(--muted);margin:6px 0}
+.layout{display:flex;justify-content:center;align-items:flex-start;gap:20px;flex-wrap:wrap}.board-wrap{padding:12px;background:#0a0f1acc;border:1px solid #35445e;border-radius:18px;box-shadow:0 18px 55px #0007}
+#game{display:block;width:min(75vw,300px);height:auto;background:#0b1020;border-radius:9px}.side{width:230px;display:grid;gap:12px}.card{background:var(--panel);border:1px solid #35445e;border-radius:15px;padding:15px}.label{color:var(--muted);text-transform:uppercase;font-size:.72rem;letter-spacing:1.5px}.score{font-size:2rem;font-weight:800;margin-top:4px}#next{width:120px;height:120px;margin-top:8px;background:#0b1020;border-radius:9px}
+button{border:0;border-radius:11px;padding:12px 14px;font-weight:750;cursor:pointer;color:#102019;background:var(--accent)}button.secondary{background:#34435d;color:#f5f7fb}button:disabled{opacity:.55;cursor:not-allowed}.buttons{display:grid;grid-template-columns:1fr 1fr;gap:9px}.buttons #restart{grid-column:1/-1}.help{color:var(--muted);font-size:.88rem;line-height:1.55}#message{min-height:22px;color:var(--accent);font-weight:700;font-size:.9rem}#serialStatus{font-size:.85rem;color:#f2d34f;margin-top:8px;line-height:1.4}.mobile{display:none;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}.mobile button{padding:13px 5px;font-size:1.1rem}
+@media(max-width:600px){body{padding:12px}.side{width:min(100%,300px);grid-template-columns:1fr 1fr}.side .card:first-child{grid-column:1/-1}.mobile{display:grid}.help{grid-column:1/-1}#next{width:90px;height:90px}}
+</style>
+</head>
+<body>
+<main class="app">
+<header><h1>MINI TETRIS</h1><p>Juega con el teclado o conecta tu joystick Arduino por USB.</p></header>
+<section class="layout">
+<div>
+<div class="board-wrap"><canvas id="game" width="300" height="600" aria-label="Tablero de Tetris"></canvas></div>
+<div class="mobile"><button data-action="left">←</button><button data-action="rotate">↻</button><button data-action="right">→</button><button data-action="down">↓</button></div>
+</div>
+<aside class="side">
+<div class="card">
+<div class="label">Puntuación</div><div class="score" id="score">0</div>
+<div class="label" style="margin-top:12px">Récord</div><div class="score" id="best">0</div>
+<div class="label" style="margin-top:12px">Nivel</div><div class="score" id="level">1</div>
+</div>
+<div class="card"><div class="label">Siguiente pieza</div><canvas id="next" width="120" height="120"></canvas></div>
+<div class="card buttons">
+<button id="start">Empezar</button><button class="secondary" id="pause">Pausar</button>
+<button class="secondary" id="restart">Reiniciar</button>
+</div>
+<div class="card">
+<button id="connect" style="width:100%">Conectar joystick Arduino</button>
+<div id="serialStatus">Joystick desconectado.</div>
+</div>
+<div class="card help">
+<div id="message">Pulsa «Empezar» para jugar.</div>
+<strong>Controles Arduino</strong><br>← → mover<br>↓ bajar<br>Botón del joystick: girar<br><br>
+<strong>Teclado</strong><br>Flechas: mover y bajar<br>↑: girar · Espacio: caída rápida · P: pausar
+</div>
+</aside>
+</section>
+</main>
+<script>
+(() => {
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const nextCanvas=document.getElementById('next'),nctx=nextCanvas.getContext('2d');
+const COLS=10,ROWS=20,SIZE=30;
+const colors=[null,'#47c9e8','#3975ef','#f49b38','#f2d34f','#55d68b','#b879ed','#ed668c'];
+const shapes=[[[1,1,1,1]],[[1,0,0],[1,1,1]],[[0,0,1],[1,1,1]],[[1,1],[1,1]],[[0,1,1],[1,1,0]],[[0,1,0],[1,1,1]],[[1,1,0],[0,1,1]]];
+let board,piece,nextPiece,score,lines,level,running=false,paused=false,over=false;
+let dropCounter=0,lastTime=0,dropInterval=850,animationId=null;
+const scoreEl=document.getElementById('score'),bestEl=document.getElementById('best'),levelEl=document.getElementById('level'),message=document.getElementById('message');
+const serialStatus=document.getElementById('serialStatus');
+let best=Number(localStorage.getItem('miniTetrisBest')||0);bestEl.textContent=best;
+let serialPort=null,reader=null,keepReading=false,lastMoveAt=0,lastButton=1;
+function emptyBoard(){return Array.from({length:ROWS},()=>Array(COLS).fill(0));}
+function randomPiece(){const t=Math.floor(Math.random()*shapes.length);return{matrix:shapes[t].map(r=>r.slice()),type:t+1,x:0,y:0};}
+function spawn(){piece=nextPiece||randomPiece();nextPiece=randomPiece();piece.x=Math.floor((COLS-piece.matrix[0].length)/2);piece.y=0;drawNext();if(collides(piece.matrix,piece.x,piece.y))endGame();}
+function collides(m,x,y){for(let r=0;r<m.length;r++)for(let c=0;c<m[r].length;c++)if(m[r][c]){let nx=x+c,ny=y+r;if(nx<0||nx>=COLS||ny>=ROWS||(ny>=0&&board[ny][nx]))return true;}return false;}
+function cell(c,x,y,color,size=SIZE){c.fillStyle=color;c.fillRect(x*size+1,y*size+1,size-2,size-2);c.fillStyle='rgba(255,255,255,.16)';c.fillRect(x*size+3,y*size+3,size-6,3);}
+function draw(){ctx.fillStyle='#0b1020';ctx.fillRect(0,0,300,600);ctx.strokeStyle='rgba(150,175,210,.09)';
+for(let x=0;x<=COLS;x++){ctx.beginPath();ctx.moveTo(x*SIZE,0);ctx.lineTo(x*SIZE,600);ctx.stroke();}
+for(let y=0;y<=ROWS;y++){ctx.beginPath();ctx.moveTo(0,y*SIZE);ctx.lineTo(300,y*SIZE);ctx.stroke();}
+board.forEach((r,y)=>r.forEach((v,x)=>{if(v)cell(ctx,x,y,colors[v]);}));
+if(piece)piece.matrix.forEach((r,y)=>r.forEach((v,x)=>{if(v)cell(ctx,piece.x+x,piece.y+y,colors[piece.type]);}));
+if(!running||paused||over){ctx.fillStyle='#050912a8';ctx.fillRect(0,0,300,600);ctx.textAlign='center';ctx.fillStyle='#fff';ctx.font='bold 23px system-ui';ctx.fillText(over?'FIN DEL JUEGO':paused?'PAUSA':'MINI TETRIS',150,275);ctx.font='14px system-ui';ctx.fillStyle='#b8c7df';ctx.fillText(over?'Pulsa Reiniciar':paused?'Pulsa P o Pausar':'Pulsa Empezar',150,305);}}
+function drawNext(){nctx.fillStyle='#0b1020';nctx.fillRect(0,0,120,120);let m=nextPiece.matrix,s=24,ox=(120-m[0].length*s)/2,oy=(120-m.length*s)/2;m.forEach((r,y)=>r.forEach((v,x)=>{if(v)cell(nctx,0,0,colors[nextPiece.type],s),nctx.fillRect(ox+x*s+1,oy+y*s+1,s-2,s-2);}));}
+function rotate(m){return m[0].map((_,i)=>m.map(r=>r[i]).reverse());}
+function move(dx){if(running&&!paused&&!over&&!collides(piece.matrix,piece.x+dx,piece.y)){piece.x+=dx;draw();}}
+function turn(){if(!running||paused||over)return;let m=rotate(piece.matrix),offset=0;while(collides(m,piece.x+offset,piece.y)){offset=offset>0?-(offset+1):-offset+1;if(Math.abs(offset)>piece.matrix[0].length)return;}piece.matrix=m;piece.x+=offset;draw();}
+function lock(){piece.matrix.forEach((r,y)=>r.forEach((v,x)=>{if(v&&piece.y+y>=0)board[piece.y+y][piece.x+x]=piece.type;}));clearLines();spawn();}
+function clearLines(){let n=0;outer:for(let y=ROWS-1;y>=0;y--){for(let x=0;x<COLS;x++)if(!board[y][x])continue outer;board.splice(y,1);board.unshift(Array(COLS).fill(0));n++;y++;}if(n){lines+=n;score+=[0,100,300,500,800][n]*level;level=1+Math.floor(lines/10);dropInterval=Math.max(110,850-(level-1)*65);scoreEl.textContent=score;levelEl.textContent=level;if(score>best){best=score;localStorage.setItem('miniTetrisBest',best);bestEl.textContent=best;}}}
+function drop(){if(!running||paused||over)return;if(!collides(piece.matrix,piece.x,piece.y+1))piece.y++;else lock();draw();}
+function hardDrop(){if(!running||paused||over)return;while(!collides(piece.matrix,piece.x,piece.y+1))piece.y++;lock();draw();}
+function update(t=0){if(!running||over){draw();return;}let d=t-lastTime;lastTime=t;if(!paused){dropCounter+=d;if(dropCounter>dropInterval){drop();dropCounter=0;}}draw();animationId=requestAnimationFrame(update);}
+function start(){if(over)return;if(!running){running=true;paused=false;message.textContent='¡A jugar!';lastTime=0;animationId=requestAnimationFrame(update);}else if(paused){paused=false;lastTime=0;message.textContent='¡A jugar!';}draw();}
+function togglePause(){if(!running||over)return;paused=!paused;message.textContent=paused?'Juego pausado':'¡A jugar!';draw();}
+function endGame(){over=true;running=false;message.textContent='¡Buen intento! Pulsa Reiniciar para volver a jugar.';if(animationId)cancelAnimationFrame(animationId);draw();}
+function restart(){if(animationId)cancelAnimationFrame(animationId);board=emptyBoard();score=0;lines=0;level=1;dropInterval=850;scoreEl.textContent='0';levelEl.textContent='1';running=false;paused=false;over=false;dropCounter=0;nextPiece=randomPiece();spawn();message.textContent='Pulsa «Empezar» para jugar.';draw();}
+function handleJoystick(x,y,sw){
+ const now=Date.now();
+ // El joystick suele marcar cerca de 512 en reposo. Se usa una zona muerta para evitar movimientos involuntarios.
+ if(now-lastMoveAt>170){
+   if(x<350){move(-1);lastMoveAt=now;}
+   else if(x>675){move(1);lastMoveAt=now;}
+   else if(y>675){drop();lastMoveAt=now;}
+ }
+ // El botón es LOW (0) al presionarse. Detecta solo el cambio para no girar repetidamente.
+ if(sw===0&&lastButton===1){turn();}
+ lastButton=sw;
+}
+async function connectArduino(){
+ if(!('serial' in navigator)){serialStatus.textContent='Tu navegador no permite Web Serial. Usa Chrome o Edge en una página HTTPS.';return;}
+ try{
+   serialPort=await navigator.serial.requestPort();
+   await serialPort.open({baudRate:9600});
+   serialStatus.textContent='Arduino conectado. Mueve el joystick para jugar.';
+   document.getElementById('connect').textContent='Arduino conectado';
+   document.getElementById('connect').disabled=true;
+   const decoder=new TextDecoderStream();
+   serialPort.readable.pipeTo(decoder.writable).catch(()=>{});
+   reader=decoder.readable.getReader();keepReading=true;
+   let buffer='';
+   while(keepReading){
+     const {value,done}=await reader.read();if(done)break;
+     buffer+=value;
+     const parts=buffer.split(/\r?\n/);buffer=parts.pop();
+     for(const line of parts){
+       const match=line.match(/X:\s*(\d+)\s*\|\s*Y:\s*(\d+)\s*\|\s*Bot[oó]n:\s*(\d+)/i);
+       if(match)handleJoystick(Number(match[1]),Number(match[2]),Number(match[3]));
+     }
+   }
+ }catch(err){serialStatus.textContent='No se pudo conectar: '+err.message+' Cierra el Monitor Serie de Arduino IDE e inténtalo otra vez.';document.getElementById('connect').disabled=false;document.getElementById('connect').textContent='Conectar joystick Arduino';}
+}
+document.addEventListener('keydown',e=>{if(['ArrowLeft','ArrowRight','ArrowDown','ArrowUp',' '].includes(e.key))e.preventDefault();if(e.key==='ArrowLeft')move(-1);else if(e.key==='ArrowRight')move(1);else if(e.key==='ArrowDown')drop();else if(e.key==='ArrowUp')turn();else if(e.key===' ')hardDrop();else if(e.key.toLowerCase()==='p')togglePause();else if(e.key==='Enter'&&!running&&!over)start();});
+document.getElementById('start').addEventListener('click',start);
+document.getElementById('pause').addEventListener('click',togglePause);
+document.getElementById('restart').addEventListener('click',restart);
+document.getElementById('connect').addEventListener('click',connectArduino);
+document.querySelectorAll('[data-action]').forEach(b=>b.addEventListener('click',()=>{let a=b.dataset.action;if(a==='left')move(-1);if(a==='right')move(1);if(a==='rotate')turn();if(a==='down')drop();}));
+restart();
+})();
+</script>
+</body>
+</html>
